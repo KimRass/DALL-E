@@ -124,6 +124,7 @@ class DiscreteVAE(nn.Module):
         normalization = ((*((0.5,) * 3), 0), (*((0.5,) * 3), 1))
     ):
         super().__init__()
+
         assert log2(image_size).is_integer(), 'image size must be a power of 2'
         assert num_layers >= 1, 'number of layers must be greater than or equal to 1'
         has_resblocks = num_resnet_blocks > 0

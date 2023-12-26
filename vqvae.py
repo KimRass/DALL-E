@@ -3,39 +3,50 @@ from torch import nn
 from torch.nn import functional as F
 
 # "We train these models using the same standard VAE architecture on CIFAR10, while varying the latent capacity (number of continuous or discrete latent variables, as well as the dimensionality of the discrete space K)."
-# "The decoder similarly has two residual 3 × 3 blocks, followed by two transposed convolutions with stride 2 and window size 4 × 4."
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, channels1, channels2):
+        super().__init__()
+
+        self.relu1 = nn.ReLU()
+        self.conv1 = nn.Conv2d(
+            in_channels=channels1,
+            out_channels=channels2,
+            kernel_size=3,
+            padding=1,
+        )
+        self.relu2 = nn.ReLU()
+        self.conv2 = nn.Conv2d(
+            in_channels=channels2,
+            out_channels=channels1,
+            kernel_size=1,
+        )
+
+    def forward(self, x):
+        x = self.relu1(x)
+        x = self.conv1(x)
+        x = self.relu2(x)
+        x = self.conv2(x)
+        return x
 
 
 # "Implemented as ReLU, 3 × 3 conv, ReLU, 1 × 1 conv"
-class ResBlock(nn.Module):
-    def __init__(self, n_hiddens, n_residual_layers, n_residual_hiddens):
+class ResidualStack(nn.Module):
+    def __init__(self, n_blocks, channels1, channels2):
         super().__init__()
 
-        layers = list()
-        for _ in range(n_residual_layers):
-            layers.append(
-                nn.Sequential(
-                    nn.ReLU(),
-                    nn.Conv2d(
-                        in_channels=n_hiddens,
-                        out_channels=n_residual_hiddens,
-                        kernel_size=3,
-                        padding=1,
-                    ),
-                    nn.ReLU(),
-                    nn.Conv2d(
-                        in_channels=n_residual_hiddens,
-                        out_channels=n_hiddens,
-                        kernel_size=1,
-                    ),
-                )
-            )
-        self.layers = nn.ModuleList(layers)
+        self.resid_blocks = nn.ModuleList(
+            [
+                ResidualBlock(channels1=channels1, channels2=channels2)
+                for _ in range(n_blocks)
+            ]
+        )
         self.relu = nn.ReLU()
 
     def forward(self, x):
-        for layer in self.layers:
-            x += layer(x)
+        for block in self.resid_blocks:
+            x += block(x)
         x = self.relu(x)
         return x
 
@@ -44,29 +55,30 @@ class ResBlock(nn.Module):
 class Encoder(nn.Module):
     def __init__(
         self,
-        in_channels,
-        n_hiddens,
-        n_downsampling_layers,
-        n_residual_layers,
-        n_residual_hiddens,
+        n_downsampling_layers=2,
+        channels=256,
+        n_resid_blocks=2,
+        resid_channels=32,
     ):
         super().__init__()
-        # See Section 4.1 of "Neural Discrete Representation Learning".
-        # The last ReLU from the Sonnet example is omitted because ResBlock starts
+
+        # The last ReLU from the Sonnet example is omitted because ResidualStack starts
         # off with a ReLU.
-        conv = nn.Sequential()
-        for downsampling_layer in range(n_downsampling_layers):
-            if downsampling_layer == 0:
-                out_channels = n_hiddens // 2
-            elif downsampling_layer == 1:
-                (in_channels, out_channels) = (n_hiddens // 2, n_hiddens)
-
+        self.layers = nn.Sequential()
+        for idx in range(1, n_downsampling_layers + 1):
+            if idx == 0:
+                in_channels=3
+                out_channels = channels // 2
+            elif idx == 1:
+                in_channels = channels // 2
+                out_channels = channels
             else:
-                (in_channels, out_channels) = (n_hiddens, n_hiddens)
+                in_channels = channels
+                out_channels = channels
 
-            conv.add_module(
-                f"down{downsampling_layer}",
-                nn.Conv2d(
+            self.layers.add_module(
+                name=f"down{idx}",
+                module=nn.Conv2d(
                     in_channels=in_channels,
                     out_channels=out_channels,
                     kernel_size=4,
@@ -74,61 +86,65 @@ class Encoder(nn.Module):
                     padding=1,
                 ),
             )
-            conv.add_module(f"relu{downsampling_layer}", nn.ReLU())
+            self.layers.add_module(name=f"relu{idx}", module=nn.ReLU())
 
-        conv.add_module(
-            "final_conv",
-            nn.Conv2d(
-                in_channels=n_hiddens,
-                out_channels=n_hiddens,
-                kernel_size=3,
-                padding=1,
-            ),
-        )
-        self.conv = conv
-        self.residual_stack = ResBlock(
-            n_hiddens, n_residual_layers, n_residual_hiddens
-        )
-
-    def forward(self, x):
-        h = self.conv(x)
-        return self.residual_stack(h)
-
-
-class Decoder(nn.Module):
-    def __init__(
-        self,
-        embedding_dim,
-        n_hiddens,
-        n_upsampling_layers,
-        n_residual_layers,
-        n_residual_hiddens,
-    ):
-        super().__init__()
-        # See Section 4.1 of "Neural Discrete Representation Learning".
         self.conv = nn.Conv2d(
-            in_channels=embedding_dim,
-            out_channels=n_hiddens,
+            in_channels=channels,
+            out_channels=channels,
             kernel_size=3,
             padding=1,
         )
-        self.residual_stack = ResBlock(
-            n_hiddens, n_residual_layers, n_residual_hiddens
+        self.resid_stack = ResidualStack(
+            n_blocks=n_resid_blocks,
+            channels1=channels,
+            channels2=resid_channels,
         )
-        upconv = nn.Sequential()
-        for upsampling_layer in range(n_upsampling_layers):
-            if upsampling_layer < n_upsampling_layers - 2:
-                (in_channels, out_channels) = (n_hiddens, n_hiddens)
 
-            elif upsampling_layer == n_upsampling_layers - 2:
-                (in_channels, out_channels) = (n_hiddens, n_hiddens // 2)
+    def forward(self, x):
+        x = self.layers(x)
+        x = self.conv(x)
+        return self.resid_stack(x)
 
+
+# "The decoder similarly has two residual 3 × 3 blocks, followed by two transposed convolutions with stride 2 and window size 4 × 4."
+class Decoder(nn.Module):
+    def __init__(
+        self,
+        n_upsampling_layers=2,
+        channels=256,
+        embedding_dim=64,
+        n_resid_blocks=2,
+        resid_channels=32,
+    ):
+        super().__init__()
+
+        self.conv = nn.Conv2d(
+            in_channels=embedding_dim,
+            # in_channels=resid_channels,
+            out_channels=channels,
+            kernel_size=3,
+            padding=1,
+        )
+        self.resid_stack = ResidualStack(
+            n_blocks=n_resid_blocks,
+            channels1=channels,
+            channels2=resid_channels,
+        )
+        self.layers = nn.Sequential()
+        for idx in range(1, n_upsampling_layers + 1):
+            if idx < n_upsampling_layers - 2:
+                in_channels = channels
+                out_channels = channels
+            elif idx == n_upsampling_layers - 2:
+                in_channels = channels
+                out_channels = channels // 2
             else:
-                (in_channels, out_channels) = (n_hiddens // 2, 3)
+                in_channels = channels // 2
+                out_channels = 3
 
-            upconv.add_module(
-                f"up{upsampling_layer}",
-                nn.ConvTranspose2d(
+            self.layers.add_module(
+                name=f"up{idx}",
+                module=nn.ConvTranspose2d(
                     in_channels=in_channels,
                     out_channels=out_channels,
                     kernel_size=4,
@@ -136,16 +152,15 @@ class Decoder(nn.Module):
                     padding=1,
                 ),
             )
-            if upsampling_layer < n_upsampling_layers - 1:
-                upconv.add_module(f"relu{upsampling_layer}", nn.ReLU())
+            if idx < n_upsampling_layers - 1:
+                self.layers.add_module(name=f"relu{idx}", module=nn.ReLU())
 
-        self.upconv = upconv
 
     def forward(self, x):
-        h = self.conv(x)
-        h = self.residual_stack(h)
-        x_recon = self.upconv(h)
-        return x_recon
+        x = self.conv(x)
+        x = self.resid_stack(x)
+        x = self.layers(x)
+        return x
 
 
 class SonnetExponentialMovingAverage(nn.Module):
@@ -173,8 +188,6 @@ class SonnetExponentialMovingAverage(nn.Module):
 class VectorQuantizer(nn.Module):
     def __init__(self, embedding_dim, n_embeddings, use_ema, decay, epsilon):
         super().__init__()
-        # See Section 3 of "Neural Discrete Representation Learning" and:
-        # https://github.com/deepmind/sonnet/blob/v2/sonnet/src/nets/vqvae.py#L142.
 
         self.embedding_dim = embedding_dim
         self.n_embeddings = n_embeddings
@@ -262,10 +275,10 @@ class VQVAE(nn.Module):
     def __init__(
         self,
         in_channels,
-        n_hiddens,
+        channels,
         n_downsampling_layers,
-        n_residual_layers,
-        n_residual_hiddens,
+        n_resid_blocks,
+        resid_channels,
         embedding_dim,
         n_embeddings,
         use_ema,
@@ -275,29 +288,39 @@ class VQVAE(nn.Module):
         super().__init__()
         self.encoder = Encoder(
             in_channels,
-            n_hiddens,
+            channels,
             n_downsampling_layers,
-            n_residual_layers,
-            n_residual_hiddens,
+            n_resid_blocks,
+            resid_channels,
         )
         self.pre_vq_conv = nn.Conv2d(
-            in_channels=n_hiddens, out_channels=embedding_dim, kernel_size=1
+            in_channels=channels, out_channels=embedding_dim, kernel_size=1
         )
         self.vq = VectorQuantizer(
             embedding_dim, n_embeddings, use_ema, decay, epsilon
         )
         self.decoder = Decoder(
             embedding_dim,
-            n_hiddens,
+            channels,
             n_downsampling_layers,
-            n_residual_layers,
-            n_residual_hiddens,
+            n_resid_blocks,
+            resid_channels,
         )
 
     def quantize(self, x):
         z = self.pre_vq_conv(self.encoder(x))
-        (z_quantized, dictionary_loss, commitment_loss, encoding_indices) = self.vq(z)
-        return (z_quantized, dictionary_loss, commitment_loss, encoding_indices)
+        (
+            z_quantized,
+            dictionary_loss,
+            commitment_loss,
+            encoding_indices,
+        ) = self.vq(z)
+        return (
+            z_quantized,
+            dictionary_loss,
+            commitment_loss,
+            encoding_indices,
+        )
 
     def forward(self, x):
         (z_quantized, dictionary_loss, commitment_loss, _) = self.quantize(x)
@@ -309,7 +332,17 @@ class VQVAE(nn.Module):
         }
 
 if __name__ == "__main__":
-    resid_stack = ResBlock(
-        n_hiddens=256, n_residual_layers=2, n_residual_hiddens=512,
+    # channels = 128
+    channels = 256
+    n_downsampling_layers = 2
+    n_resid_blocks = 2
+    resid_channels = 32
+    n_upsampling_layers = 2
+    embedding_dim = 64
+    dec = Decoder(
+        n_upsampling_layers=n_upsampling_layers,
+        channels=channels,
+        embedding_dim=embedding_dim,
+        n_resid_blocks=n_resid_blocks,
+        resid_channels=resid_channels,
     )
-    resid_stack
